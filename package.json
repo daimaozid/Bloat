@@ -1,0 +1,18 @@
+{
+  "name": "audit",
+  "version": "1.0.0",
+  "description": "Check bloat for websites",
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {},
+  "devDependencies": {
+    "@eslint/js": "^9.39.2",
+    "@playwright/test": "^1.57.0",
+    "@types/node": "^25.0.3",
+    "eslint": "^9.39.2",
+    "globals": "^16.5.0"
+  },
+  "type": "module"
+}
