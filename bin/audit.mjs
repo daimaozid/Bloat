@@ -9,12 +9,54 @@
 
 import {chromium} from "playwright";
 import {parseArgs} from "node:util";
-import * as readline from "node:readline";
+import * as readlinePromises from "node:readline/promises";
+
+//Return value of Audit
+//0 = No error
+//1 = Minor error (program can still run)
+// Ex. 1 broken url found
+//2 = Major error (program terminates)
+// Ex. Unknown flags
+let errno = 0;
+
+//Booleans for flags
+let isHeadless = false;
+let isContinuous = false;
+let isVerbose = false;
+
+
+//Log specifics in verbose mode
+function verboseLog(isVerbose, err) {
+    if (isVerbose) {
+        console.error(`Verbose: ${err.message}`);
+    }
+}
+
+//TODO: Implement
+function output(filename) {
+
+}
+
+//TODO: Implement
+function format(res, isHuman, isPretty) {
+
+}
+
+//TODO: Implement
+function pretty(line) {
+
+}
+
+//TODO: Implement
+function recursiveBrowse() {
+
+}
+
 
 //Open the requested page
 async function browse(userURL) {
     const browser = await chromium.launch({
-        headless: true,
+        headless: isHeadless,
     });
 
     //Wait until page finishes loading
@@ -114,34 +156,92 @@ async function browse(userURL) {
 }
 
 //Continuous Mode
-function input() {
-    const rl = readline.createInterface({
+async function input() {
+    const rl = readlinePromises.createInterface({
         input: process.stdin,
         output: process.stdout,
     });
 
-    rl.question(`Enter URL ("https://example.com")`, input => {
-        //TODO: Filter input
+    function isValidURL(userURL) {
+        try {
+            new URL(userURL);
+            return true;
+        } catch(err) {
+            errno = 1;
+            console.error("Error: Invalid URL");
 
-        const userURL = input;
-        console.log(`Launching ${userURL}!`);
-        rl.close();
-        browse(userURL);
-    });
+
+            return false;
+        }
+    }
+
+    const stopWords = ["stop", "exit", "quit", "end"];
+
+    while (true) {
+        let userURL = await rl.question("Enter URL (https://example.com)\n");
+
+        userURL = userURL.trim();
+
+        //Stops loop
+        if (stopWords.includes(userURL.toLowerCase())) {
+            break;
+        }
+
+        if (isValidURL(userURL)) {
+            console.log(`Launching ${userURL}!`);
+            await browse(userURL);
+        }
+    }
+    rl.close();
+    console.log("Exiting Audit.");
 }
 
 //Flags
 //--help
 // Show instructions and flags for Audit
+//--version
+// Show Audit version
+//--blame
+// Blame the guy that wrote this with a randomized insult
 //-h, --headless
 // Run Audit in headless mode (no browser window)
 //-c --continuous
-// Long running mode, Audit accepts url input until terminated
+// Long running mode. Audit accepts url input until terminated
 //-v --verbose
 // More detailed output
+//-o --output
+// Logs output to a specified file
+//-f --format
+// Logs output in human readable format
+//-p --pretty
+// Logs output with colored lines
+// Green = Non-bloated sites
+// Red = Bloated sites
+//-r --recursive
+// Samples the site up to a specified number of times
+// Ex. audit -r 5 en.wikipedia.org 
+// will try to sample up to 5 pages from the URLs provided
+// and calculate by averaging the memory size/word
+//-b --baseline
+// Manually set a baseline memory size/word for Audit to compare to
+//-w --wait
+// Set the max amount of time in ms Audit should wait for a page to load
+// before measuring memory usage
+//-s --scroll
+// Audit will attempt to scroll down a page to trigger lazy loading sites
+// Useful for pages with infinite scrolling
+
 const config = {
     options: {
         help: {
+            type: "boolean",
+            default: false,
+        },
+        version: {
+            type: "boolean",
+            default: false,
+        },
+        blame: {
             type: "boolean",
             default: false,
         },
@@ -160,18 +260,43 @@ const config = {
             short: "v",
             default: false,
         },
+        output: {
+            type: "string",
+            short: "o",
+            default: "log.txt",
+        },
+        format: {
+            type: "boolean",
+            short: "f",
+            default: false,
+        },
+        pretty: {
+            type: "boolean",
+            short: "p",
+            default: false,
+        },
+        recursive: {
+            type: "string",
+            short: "r",
+        },
+        baseline: {
+            type: "string",
+            short: "b",
+        },
+        wait: {
+            type: "string",
+            short: "w",
+        },
+        scroll: {
+            type: "boolean",
+            short: "s",
+            default: false,
+        },
     },
     allowPositionals: true
 };
 
 
-//Return value of Audit
-//0 = No error
-//1 = Minor error (program can still run)
-// Ex. 1 broken url found
-//2 = Major error (program terminates)
-// Ex. Unknown flags
-let errno = 0;
 
 //Main function to loop over urls
 //TODO: Implement
@@ -199,7 +324,18 @@ try {
         process.exit(errno);
     }
 
-    processURLs(positionals);
+    //Setting values for flags
+    isHeadless = values.headless;
+    isContinuous = values.continuous;
+    isVerbose = values.verbose;
+
+    //TODO: add text
+    if (isContinuous) {
+        console.log("Audit is running in continuous mode!");
+        await input();
+    } else {
+        processURLs(positionals);
+    }
 
 } catch (err) {
     errno = 2;
