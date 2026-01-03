@@ -8,7 +8,7 @@
  */
 
 import {chromium} from "playwright";
-import {parseArgs} from "node:util";
+import {parseArgs, styleText} from "node:util";
 import * as readlinePromises from "node:readline/promises";
 
 //Return value of Audit
@@ -20,6 +20,7 @@ import * as readlinePromises from "node:readline/promises";
 let errno = 0;
 
 //Values for options
+let isScroll = false;
 let isHeadless = false;
 let isContinuous = false;
 let isVerbose = false;
@@ -29,7 +30,6 @@ let recursionLevel = 0; //--recursive
 let baseline = 0; //--baseline
 let isBaselineSpecified = false;
 let waitMS = 30000; //--wait
-let isWaitSpecified = false;
 let decPlaces = 3; //--decimal
 let isDecPlaceSpecified = false; //--decimal
 
@@ -37,32 +37,43 @@ let isDecPlaceSpecified = false; //--decimal
 const results = {
     list: [],
     avgMem: 0,
+    oldLen: 0, //Old length of list used for memoization
 };
 
-//Log specifics in verbose mode
-function verboseLog(isVerbose, err, msg) {
-    if (isVerbose) {
-        //Seperate normal logs from error logs
-        //err is an Error object
-        //if err, ignore msg
-        if (err) {
-            console.error(`Verbose: ${err.message}`);
-        } else {
-            console.log(`Verbose: ${msg}`);
-        }
+//Makes a string pretty for logging in console
+//Reject Chalk, return to Node:Util
+function pretty(str, type) {
+    const styles = {
+        success: "green",
+        err: "red",
+        info: "cyan",
+        header: ["yellow", "bold"]
+    };
+    
+    return styleText(styles[type], str);
+}
 
-        //TODO: Color lines in --pretty
+//Wrapper for console.log and console.error
+//Checks for --pretty and applies colors automatically
+function println(str, type) {
+    //With --pretty
+    let line;
+    if (isPretty) {
+        line = pretty(str, type);
+    } else {
+        line = str;
+    }
+
+    if (type === "err") {
+        console.error(line);
+    } else {
+        console.log(line);
     }
 }
 
+
 //TODO: Implement
 function output(filename) {
-
-}
-
-//Function to truncate URL
-//Removes https:// and everything after domain
-function truncURL(userURL) {
 
 }
 
@@ -91,8 +102,32 @@ function formatUnit(mem, isFormat) {
     return `${isFormat ? "~" : ""}${outputMem} ${units[index]}/Word`;
 }
 
-//TODO: Implement
-function format(res, isFormat, isPretty) {
+//Log specifics in verbose mode
+function verboseLog(isVerbose, err, msg) {
+    if (isVerbose) {
+        //Outputs err.message if msg is not provided
+        const line = msg || err.message;
+        println(`Verbose: ${line}`, err ? "err" : "info");
+    }
+}
+
+//Formats output and prints to console
+//--pretty only affects human format and errors
+function format(res, isFormat) {
+    //Sanity check
+    if (res.list.length === 0) {
+        //Continuous mode
+        //Log error and continue
+        if (isContinuous) {
+            println("Error: No result currently available!", "err");
+            return;
+        }
+
+        //Normal mode
+        //If nothing worked, just log error and exit
+        throw new Error("No result available!");
+    }
+
     //Format output
     if (isFormat) {
         //Human format would look something like:
@@ -113,22 +148,24 @@ function format(res, isFormat, isPretty) {
         //UNIT is automatically converted to the neatest unit
         //Always in binary units (KiB, MiB, GiB, etc.)
 
-        //TIME
+        //Style: Header (Yellow + Bold)
+        //Time
         const date = new Date().toString();
-        console.log("Logged on:", date);
+        println(`Logged on: ${date}`, "header");
 
         //Avg Mem
-        //TODO: Add memoization 
-        res.avgMem = res.list.reduce((sum, r) => {
-            //Avoid NaN
-            r.totalWC = r.totalWC || 1;
-            return sum += r.memSize / r.totalWC;
-        }, 0) / res.list.length;
-        console.log("Avg Mem/Word:", formatUnit(res.avgMem, isFormat));
+        for (let i = res.oldLen; i < res.list.length; ++i) {
+            res.avgMem += res.list[i].memSizePerWord;
+        }
+        res.oldLen = res.list.length;
 
         if(!isBaselineSpecified) {
-            baseline = res.avgMem;
+            baseline = res.avgMem / res.list.length;
         }
+
+        const formattedNum = formatUnit(baseline, isFormat);
+
+        println(`Avg Mem/Word: ${formattedNum}`, "header");
 
         let urlCol = "URL List";
         let memCol = "Mem/Word";
@@ -136,58 +173,86 @@ function format(res, isFormat, isPretty) {
         let numBloated = 0;
 
         //TODO: Add options to change col width settings
-
         //Headers
-            console.log(`${urlCol.padEnd(32)}${memCol.padEnd(16)}${bloatCol.padEnd(8)}`);
+        println(`${urlCol.padEnd(32)}${memCol.padEnd(16)}${bloatCol.padEnd(8)}`, "header");
 
+        //Results
+        //Style: Success (Green)
         for (const r of res.list) {
-            //TODO: Truncate URL
-            urlCol = r.userURL;
 
-            //Avoid NaN
-            r.totalWC = r.totalWC || 1;
+            let style = "success";
 
-            //TODO: Add verbose log for r.memUsed / r.totalWC
+            //Displays host only
+            urlCol = r.userURL.host;
             memCol = formatUnit(r.memSize / r.totalWC, isFormat);
             bloatCol = "No";
-            if (r.memSize / r.totalWC > baseline) {
+            if (r.memSizePerWord > baseline) {
                 bloatCol = "Yes";
                 numBloated++;
+                style = "err";
             }
 
-            console.log(`${urlCol.padEnd(32)}${memCol.padEnd(16)}${bloatCol.padEnd(8)}`);
+            println(`${urlCol.padEnd(32)}${memCol.padEnd(16)}${bloatCol.padEnd(8)}`, style);
         }
 
         //Num of bloated sites
-        console.log(`# of bloated sites: ${numBloated}`);
-        console.log(`# of good sites: ${res.list.length - numBloated}`);
+        println(`# of bloated sites: ${numBloated}`, "header");
+        println(`# of good sites: ${res.list.length - numBloated}`, "header");
 
     } else {
         //Non human mode simply prints URL + formatted Mem/Word
         for (const r of res.list) {
-            console.log(`${r.userURL} ${formatUnit(r.memSize / r.totalWC)}`);
+            println(`${r.userURL.toString()} ${formatUnit(r.memSize / r.totalWC)}`, "success");
         }
     }
 }
 
-//TODO: Implement
-function pretty(line) {
-
+//Helper to check URL
+//Returns an URL object if valid, null otherwise
+function isValidURL(userURL) {
+    try {
+        //URL constructor does quite a few nice things
+        //1. Trims whitespace
+        //2. Normalize cases for protocol and host
+        //3. Resolves relative pathing
+        //4. Encodes special characters (e.g. Space)
+        return new URL(userURL);
+    } catch(err) {
+        errno = 1;
+        return null;
+    }
 }
 
 //Open the requested page
 async function browse(userURL, recursionLevel) {
+
+    //Check URL is valid
+    if ((userURL = isValidURL(userURL))) {
+        verboseLog(isVerbose, null, `Launching ${userURL.toString()}`);
+    } else {
+        println("Error: Invalid URL", "err");
+        return;
+    }
+
     const browser = await chromium.launch({
         headless: isHeadless,
     });
 
-    //Wait until page finishes loading
-    //TODO: Add logic to handle page load error
-    const page = await browser.newPage();
-    await page.goto(userURL, {waitUntil: "networkidle"});
+    //TODO: Launch all pages at the same time
 
-    //Get JS heap mem of page
-    //Returns an object with JSHeapUsedSize and usedJSHeapSize
+    //Wait until page finishes loading or hits timeout
+    const page = await browser.newPage();
+    try {
+        await page.goto(userURL.toString(), {
+            waitUntil: "load",
+            timeout: waitMS
+        });
+    } catch(err) {
+        //Log timeouts in verbose mode
+        verboseLog(isVerbose, null, `Timeout ${waitMS}ms exceeded.`);
+    }
+
+    //Returns total mem allocated of a page
     async function getMem() {
         const client = await page.context().newCDPSession(page);
 
@@ -197,26 +262,24 @@ async function browse(userURL, recursionLevel) {
         // Fetch the metrics
         const {metrics} = await client.send("Performance.getMetrics");
 
-        const memUsed = metrics.find(
-                                m => m.name === "JSHeapUsedSize"
-                            ).value;
-
         const memSize = metrics.find(
                                 m => m.name === "JSHeapTotalSize"
                             ).value;
 
-        return {memUsed, memSize};
+        //Detach CDPSession
+        await client.detach();
+
+        return memSize;
     }
 
-    const mem = await getMem();
-
+    const memSize = await getMem();
 
     //Evaluation inside browser
     let res = await page.evaluate(async () => {
-
         const result = {
             totalWC: 0,
-            retMsg: "Connection Success"
+            hasError: false,
+            returnMsg: "Connection successful."
         };
 
         //Word count helper
@@ -228,10 +291,8 @@ async function browse(userURL, recursionLevel) {
             return len;
         }
 
-
         //Helper for walking DOM tree
         async function walk() {
-            //https://dev.to/k_ivanow/treewalker-a-practical-guide-to-dom-traversal-hn6
             const walker = document.createTreeWalker(
                 document.body, // Root node to start traversal
                 NodeFilter.SHOW_TEXT, // Only show text nodes
@@ -265,37 +326,41 @@ async function browse(userURL, recursionLevel) {
             while ((node = walker.nextNode()) !== null) {
                 result.totalWC += wc(node.textContent);
             }
-
         }
 
-        await walk();
+        try {
+            await walk();
+        } catch(err) {
+            result.hasError = true;
+            result.returnMsg = "Connection failed.";
+        }
 
         return result;
     });
 
-    res = {...res, ...mem, userURL};
+    //Sanity check for memSize
+    if (memSize <= 0) {
+        res.hasError = true;
+        res.returnMsg = "Unable to get page memory.";
+    }
+
+    verboseLog(isVerbose, null, res.returnMsg);
+
+    //Check if res has error
+    if (res.hasError) {
+        await browser.close();
+        return;
+    }
+
+    //userURL is an URL object
+    res = {...res, memSize, userURL};
+
+    //Avoid NaN for pages with no words
+    res.totalWC = res.totalWC || 1;
+    res.memSizePerWord = res.memSize / res.totalWC;
     results.list.push(res);
 
-    // if (res.totalWC !== 0) {
-        // const usedMemPerWord = (res.memUsed / res.totalWC).toFixed(decPlaces);
-        // const allocatedMemPerWord = (res.memSize / res.totalWC).toFixed(decPlaces);
-        // console.log(`Used memory/Word: ${usedMemPerWord}`);
-        // console.log(`Allocated memory/Word: ${allocatedMemPerWord}`);
-    // }
-
-
     await browser.close();
-}
-
-//Helper to check URL
-function isValidURL(userURL) {
-    try {
-        new URL(userURL);
-        return true;
-    } catch(err) {
-        errno = 1;
-        return false;
-    }
 }
 
 //Continuous Mode
@@ -305,74 +370,38 @@ async function input() {
         output: process.stdout,
     });
 
-
     const stopWords = ["q", "stop", "exit", "quit", "end"];
 
-    while (true) {
-        let userURL = await rl.question("Enter URL (https://example.com)\n");
+    println("Type RESET in all caps to reset the current list!", "info");
 
-        userURL = userURL.trim();
+    while (true) {
+        const userURL = await rl.question("Enter URL (https://example.com)\n");
 
         //Stops loop
         if (stopWords.includes(userURL.toLowerCase())) {
             break;
         }
-
-        if (isValidURL(userURL)) {
-            verboseLog(isVerbose, null, `Launching ${userURL}!`);
-            await browse(userURL, recursionLevel);
-            format(results, isFormat, isPretty);
-        } else {
-            console.error("Error: Invalid URL");
+        
+        //RESET (has to be all caps)
+        //Clears current list
+        if (userURL.trim() === "RESET") {
+            results.list = [];
+            results.avgMem = 0;
+            results.oldLen = 0;
+            continue;
         }
+
+        await browse(userURL, recursionLevel);
+
+        //Format output
+        format(results, isFormat, isPretty);
     }
+
     rl.close();
-    console.log("Exiting Audit.");
+    println("Exiting Audit.", "info");
 }
 
-//Audit: Test RAM usage of websites!
 //Flags
-//--help
-// Show instructions and flags for Audit
-//--version
-// Show Audit version
-//--blame
-// Blame the guy that wrote this with a randomized insult
-//--update
-// Check for updates and update Audit if needed
-//--reset
-// Clear the log file for Audit
-//-h, --headless
-// Run Audit in headless mode (no browser window)
-//-c --continuous
-// Long running mode. Audit accepts url input until terminated
-//-v --verbose
-// More detailed output
-//-o --output
-// Logs output to a specified file
-//-f --format
-// Logs output in human readable format
-//-p --pretty
-// Logs output with colored lines
-// Green = Non-bloated sites
-// Red = Bloated sites
-//-r --recursive
-// Samples the site up to a specified number of times
-// Ex. audit -r 5 en.wikipedia.org 
-// will try to sample up to 5 pages from the URLs provided
-// and calculate by averaging the memory size/word
-//-b --baseline
-// Manually set a baseline memory size/word for Audit to compare to
-//-w --wait
-// Set the max amount of time in ms Audit should wait for a page to load
-// before measuring memory usage
-//-s --scroll
-// Audit will attempt to scroll down a page to trigger lazy loading sites
-// Useful for pages with infinite scrolling
-//-d --decimal
-// Change number of decimal places for output
-// Default is 3
-
 const config = {
     options: {
         help: {
@@ -391,7 +420,7 @@ const config = {
             type: "boolean",
             default: false,
         },
-        reset: {
+        scroll: {
             type: "boolean",
             default: false,
         },
@@ -437,7 +466,7 @@ const config = {
             type: "string",
             short: "w",
         },
-        scroll: {
+        sort: {
             type: "boolean",
             short: "s",
             default: false,
@@ -450,25 +479,20 @@ const config = {
     allowPositionals: true
 };
 
-
-
 //Main function to loop over urls
 async function processURLs(urls) {
     //Sanity check
     if (urls.length === 0) {
-        errno = 2;
         throw new Error("No urls provided!");
     }
 
     //Loop
     for (const userURL of urls) {
-        if (isValidURL(userURL)) {
-            verboseLog(isVerbose, null, `Launching ${userURL}!`);
-            await browse(userURL, recursionLevel);
-        } else {
-            console.error("Error: Invalid URL");
-        }
+        await browse(userURL, recursionLevel);
     }
+
+    //Format output
+    format(results, isFormat, isPretty);
 }
 
 try {
@@ -490,8 +514,8 @@ try {
     Blame the guy that wrote this with a randomized insult
     --update
     Check for updates and update Audit if needed
-    --reset
-    Clear the log file for Audit
+    --scroll
+    Scrolls down a page to try to trigger lazy loading
     -h, --headless
     Run Audit in headless mode (no browser window)
     -c --continuous
@@ -504,11 +528,13 @@ try {
     Logs output in human readable format
     -p --pretty
     Logs output with colored lines
-    Green = Non-bloated sites
-    Red = Bloated sites
+    Only works if stdout and stderr supports colors
+    Green: Non-bloated sites
+    Red: Bloated sites / Error
+    Cyan: Info
     -r --recursive
     Samples the site up to a specified number of times
-    Ex. audit -r 5 en.wikipedia.org 
+    Ex. audit -r 5 https://en.wikipedia.org 
     will try to sample up to 5 pages from the URLs provided
     and calculate by averaging the memory size/word
     -b --baseline
@@ -516,41 +542,34 @@ try {
     -w --wait
     Set the max amount of time in ms Audit should wait for a page to load
     before measuring memory usage
-    -s --scroll
-    Audit will attempt to scroll down a page to trigger lazy loading sites
-    Useful for pages with infinite scrolling
+    -s --sort
+    Sorts the result in ascending order of RAM usage
     -d --decimal
     Change number of decimal places for output
     Default is 3`;
         console.log(helpMsg);
-        process.exit(errno);
     }
 
     //--version
     //TODO: Implement
     if (values.version) {
         console.log("Audit version");
-        process.exit(errno);
     }
 
     //--blame
     //TODO: Implement
     if (values.blame) {
         console.log("Something rude :(");
-        process.exit(errno);
-    }
-
-    //--reset
-    //TODO: Implement
-    if (values.reset) {
-        console.log("Audit reset");
-        process.exit(errno);
     }
 
     //--update
     //TODO: Implement
     if (values.update) {
         console.log("Audit update");
+    }
+
+    //Terminate on long flags
+    if (values.help || values.version || values.blame || values.update) {
         process.exit(errno);
     }
 
@@ -562,37 +581,40 @@ try {
     isContinuous = values.continuous;
     isVerbose = values.verbose;
     isFormat = values.format;
-    isPretty = values.pretty;
+    isScroll = values.scroll;
     recursionLevel = parseInt(values.recursion);
+
+    //--pretty only applies if both
+    //stdout and stderr support colors
+    if (process.stdout.hasColors() && process.stderr.hasColors()) {
+        isPretty = values.pretty;
+    }
+
     if(values.baseline) {
         baseline = parseInt(values.baseline);
         isBaselineSpecified = true;
     }
-    if(values.waitMS) {
-        waitMS = parseInt(values.waitMS);
-        isWaitSpecified = true;
+    if(values.wait) {
+        waitMS = parseInt(values.wait);
     }
     if(values.decimal) {
         decPlaces = parseInt(values.decimal);
         isDecPlaceSpecified = true;
     }
 
-
-    //TODO: add text
     if (isContinuous) {
-        console.log("Audit is running in continuous mode!");
+        println("Audit is running in continuous mode!", "info");
         await input();
     } else {
         await processURLs(positionals);
-        format(results, isFormat, isPretty);
     }
 
 } catch (err) {
     errno = 2;
-    console.error(`Error: ${err.message}`);
+    println(`Error: ${err.message}`, "err");
 }
 
+//TODO: Delete
+console.log("Errno:", errno);
+
 process.exit(errno);
-
-
-
