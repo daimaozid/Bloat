@@ -9,7 +9,7 @@
 
 import {chromium} from "playwright";
 import {parseArgs, styleText} from "node:util";
-import * as readlinePromises from "node:readline/promises";
+import { createInterface } from 'node:readline/promises';
 
 //Return value of Audit
 //0 = No error
@@ -20,12 +20,12 @@ import * as readlinePromises from "node:readline/promises";
 let errno = 0;
 
 //Values for options
-let isScroll = false;
 let isHeadless = false;
 let isContinuous = false;
 let isVerbose = false;
 let isFormat = false;
 let isPretty = false;
+let isSorted = true;
 let recursionLevel = 0; //--recursive
 let baseline = 0; //--baseline
 let isBaselineSpecified = false;
@@ -45,6 +45,7 @@ const results = {
 function pretty(str, type) {
     const styles = {
         success: "green",
+        fail: ["red", "bold"], //DO NOT use this for stderr
         err: "red",
         info: "cyan",
         header: ["yellow", "bold"]
@@ -113,19 +114,26 @@ function verboseLog(isVerbose, err, msg) {
 
 //Formats output and prints to console
 //--pretty only affects human format and errors
-function format(res, isFormat) {
+function format(res) {
     //Sanity check
     if (res.list.length === 0) {
         //Continuous mode
         //Log error and continue
         if (isContinuous) {
-            println("Error: No result currently available!", "err");
+            println("Error: No result available!", "err");
             return;
         }
 
         //Normal mode
         //If nothing worked, just log error and exit
         throw new Error("No result available!");
+    }
+
+    //Sort list (ascending order)
+    if (isSorted) {
+        results.list.sort(
+            (pg1, pg2) => pg1.memSizePerWord - pg2.memSizePerWord
+        );
     }
 
     //Format output
@@ -189,7 +197,7 @@ function format(res, isFormat) {
             if (r.memSizePerWord > baseline) {
                 bloatCol = "Yes";
                 numBloated++;
-                style = "err";
+                style = "fail";
             }
 
             println(`${urlCol.padEnd(32)}${memCol.padEnd(16)}${bloatCol.padEnd(8)}`, style);
@@ -223,37 +231,14 @@ function isValidURL(userURL) {
     }
 }
 
-//Open the requested page
-async function browse(userURL, recursionLevel) {
-
-    //Check URL is valid
-    if ((userURL = isValidURL(userURL))) {
-        verboseLog(isVerbose, null, `Launching ${userURL.toString()}`);
-    } else {
-        println("Error: Invalid URL", "err");
-        return;
-    }
-
-    const browser = await chromium.launch({
-        headless: isHeadless,
-    });
-
-    //TODO: Launch all pages at the same time
-
-    //Wait until page finishes loading or hits timeout
-    const page = await browser.newPage();
-    try {
-        await page.goto(userURL.toString(), {
-            waitUntil: "load",
-            timeout: waitMS
-        });
-    } catch(err) {
-        //Log timeouts in verbose mode
-        verboseLog(isVerbose, null, `Timeout ${waitMS}ms exceeded.`);
-    }
+//Helper for browse
+//Handles everything for pages
+//Unsurprisingly, the ugliest code of the entire project
+//is the one that's the most idiomatic JS
+async function browsePage(browser, userURL) {
 
     //Returns total mem allocated of a page
-    async function getMem() {
+    async function getMem(page) {
         const client = await page.context().newCDPSession(page);
 
         // Enable the Performance domain
@@ -272,100 +257,151 @@ async function browse(userURL, recursionLevel) {
         return memSize;
     }
 
-    const memSize = await getMem();
+    //Giant try/catch
+    //Basically a transaction for each page
+    //Everything has to go right
+    //Otherwise fail and move on
+    let page;
+    try {
+        //Wait until page finishes loading or hits timeout
+        page = await browser.newPage();
 
-    //Evaluation inside browser
-    let res = await page.evaluate(async () => {
-        const result = {
-            totalWC: 0,
-            hasError: false,
-            returnMsg: "Connection successful."
-        };
+        await page.goto(userURL.toString(), {
+            waitUntil: "load",
+            timeout: waitMS
+        });
 
-        //Word count helper
-        function wc(text) {
-            // \s+ matches >=1 whitespace
-            const len = text.trim().split(/\s+/)
-                        .filter(word => word.length > 0).length;
-            console.log(text.trim());
-            return len;
-        }
+        //Evaluation inside browser
+        let res = await page.evaluate(async () => {
+            const result = {
+                totalWC: 0,
+            };
 
-        //Helper for walking DOM tree
-        async function walk() {
-            const walker = document.createTreeWalker(
-                document.body, // Root node to start traversal
-                NodeFilter.SHOW_TEXT, // Only show text nodes
-                {
-                    acceptNode: function(node) {
-                        //Ignore certain tags
-                        const ignoreTag = [
-                            "SCRIPT",
-                            "STYLE",
-                            "NOSCRIPT",
-                            "SVG",
-                            "CANVAS"
-                        ];
-
-                        //Only accept text nodes that aren't empty
-                        //Check has a parent first
-                        const ret = node.parentElement
-                            && !ignoreTag.includes(
-                                node.parentElement.tagName
-                            )
-                            && node.textContent.trim().length > 0
-                            ? NodeFilter.FILTER_ACCEPT
-                            : NodeFilter.FILTER_REJECT;
-
-                        return ret;
-                    }
-                }
-            );
-
-            let node;
-            while ((node = walker.nextNode()) !== null) {
-                result.totalWC += wc(node.textContent);
+            //Word count helper
+            function wc(text) {
+                // \s+ matches >=1 whitespace
+                // Ternary is slightly more efficient/accurate
+                // compared to just split on an empty string
+                // because "".split() = [""] (len = 1)
+                const trimmed = text.trim();
+                const len = trimmed ? trimmed.split(/\s+/).length : 0;
+                return len;
             }
-        }
 
-        try {
+            //Helper for walking DOM tree
+            async function walk() {
+                const walker = document.createTreeWalker(
+                    document.body, // Root node to start traversal
+                    NodeFilter.SHOW_TEXT, // Only show text nodes
+                    {
+                        acceptNode: function(node) {
+                            //Ignore certain tags
+                            const ignoreTag = [
+                                "SCRIPT",
+                                "STYLE",
+                                "NOSCRIPT",
+                                "SVG",
+                                "CANVAS"
+                            ];
+
+                            //Only accept text nodes that aren't empty
+                            //Check has a parent first
+                            const ret = node.parentElement
+                                && !ignoreTag.includes(
+                                    node.parentElement.tagName
+                                )
+                                && node.textContent.trim().length > 0
+                                ? NodeFilter.FILTER_ACCEPT
+                                : NodeFilter.FILTER_REJECT;
+
+                            return ret;
+                        }
+                    }
+                );
+
+                let node;
+                while ((node = walker.nextNode()) !== null) {
+                    result.totalWC += wc(node.textContent);
+                }
+            }
+
             await walk();
-        } catch(err) {
-            result.hasError = true;
-            result.returnMsg = "Connection failed.";
+
+            return result;
+        });
+
+        const memSize = await getMem(page);
+
+        //Sanity check for memSize
+        if (memSize <= 0) {
+            errno = 1;
+            println(`Error: Unable to get RAM of ${userURL}`, "err");
+            return;
         }
 
-        return result;
+        verboseLog(isVerbose, null, `${userURL} audited.`);
+
+        //userURL is an URL object
+        res = {...res, memSize, userURL};
+
+        //Avoid NaN for pages with no words
+        res.totalWC = res.totalWC || 1;
+        res.memSizePerWord = res.memSize / res.totalWC;
+        results.list.push(res);
+    } catch(err) {
+        errno = 1;
+        println(`Error: Page evaluation of ${userURL} failed.`, "err");
+        return;
+    } finally {
+        //The ugliest line in existence
+        if (page) {
+            await page.close().catch(() => {});
+        }
+    }
+}
+
+//Spawns the browser instance and shared context
+//Closes browser after all pages are done
+async function browse(userURL, recursionLevel) {
+    //Launch browser
+    const browser = await chromium.launch({
+        headless: isHeadless,
     });
 
-    //Sanity check for memSize
-    if (memSize <= 0) {
-        res.hasError = true;
-        res.returnMsg = "Unable to get page memory.";
+    //Promise.all() takes in array of promises
+    //Which means map() that returns array of promises is preferred
+    //HOWEVER, since Audit skips URLs, for loop is still used
+
+    const promises = [];
+    //userURL is an array of potential URLs
+    for (let url of userURL) {
+        //Check URL is valid
+        if ((url = isValidURL(url))) {
+            verboseLog(isVerbose, null, `Launching ${url.toString()}`);
+        } else {
+            println("Error: Invalid URL", "err");
+            continue;
+        }
+
+        //Note the lack of await here for concurrency
+        //Quick explainer for async in JS...
+        //It's syntax sugar for
+        //return new Promise(...);
+        //So no race condition here
+        //pg would immediately hold a Promise object
+        //which is then pushed
+        const pg = browsePage(browser, url);
+        promises.push(pg);
     }
 
-    verboseLog(isVerbose, null, res.returnMsg);
-
-    //Check if res has error
-    if (res.hasError) {
-        await browser.close();
-        return;
-    }
-
-    //userURL is an URL object
-    res = {...res, memSize, userURL};
-
-    //Avoid NaN for pages with no words
-    res.totalWC = res.totalWC || 1;
-    res.memSizePerWord = res.memSize / res.totalWC;
-    results.list.push(res);
+    await Promise.all(promises);
 
     await browser.close();
 }
 
 //Continuous Mode
 async function input() {
-    const rl = readlinePromises.createInterface({
+    const rl = createInterface({
         input: process.stdin,
         output: process.stdout,
     });
@@ -373,6 +409,7 @@ async function input() {
     const stopWords = ["q", "stop", "exit", "quit", "end"];
 
     println("Type RESET in all caps to reset the current list!", "info");
+    println("Type OUTPUT in all caps to ouput the current list!", "info");
 
     while (true) {
         const userURL = await rl.question("Enter URL (https://example.com)\n");
@@ -391,13 +428,27 @@ async function input() {
             continue;
         }
 
-        await browse(userURL, recursionLevel);
+        //OUTPUT
+        //Outputs current list
+        if (userURL.trim() === "OUTPUT") {
+            format(results);
+            continue;
+        }
 
-        //Format output
-        format(results, isFormat, isPretty);
+        //Encapsulate userURL in an array for browse()
+        await browse([userURL], recursionLevel);
+
+        println(`${userURL} audited!`, "info");
     }
 
     rl.close();
+
+    //TODO: Pipe to file for --output
+    //Call format after switching pipe
+
+    //Format output
+    format(results);
+
     println("Exiting Audit.", "info");
 }
 
@@ -417,10 +468,6 @@ const config = {
             default: false,
         },
         update: {
-            type: "boolean",
-            default: false,
-        },
-        scroll: {
             type: "boolean",
             default: false,
         },
@@ -487,12 +534,12 @@ async function processURLs(urls) {
     }
 
     //Loop
-    for (const userURL of urls) {
-        await browse(userURL, recursionLevel);
-    }
+    await browse(urls, recursionLevel);
+
+    //TODO: Pipe to file for --output
 
     //Format output
-    format(results, isFormat, isPretty);
+    format(results);
 }
 
 try {
@@ -511,15 +558,14 @@ try {
     --version
     Show Audit version
     --blame
-    Blame the guy that wrote this with a randomized insult
+    Spiritually blames the guy that wrote this
+    In other words, only useful for venting and hurting my feelings :(
     --update
     Check for updates and update Audit if needed
-    --scroll
-    Scrolls down a page to try to trigger lazy loading
     -h, --headless
     Run Audit in headless mode (no browser window)
     -c --continuous
-    Long running mode. Audit accepts url input until terminated
+    Long running mode. Audit accepts URL input until terminated
     -v --verbose
     More detailed output
     -o --output
@@ -557,9 +603,20 @@ try {
     }
 
     //--blame
-    //TODO: Implement
     if (values.blame) {
-        console.log("Something rude :(");
+        const responses = [
+            "Owie...",
+            "Good one.",
+            "Did you do it just to test out --blame?",
+            "Sticks and stones may break my bones, but names will never hurt me... *sniffle*",
+            "Check out git blame. You can actually blame people with that.",
+            "You discovered a secret response! Oh wait, you didn't.",
+            "I guess this flag is minorly useful for checking if Audit is installed properly?",
+        ];
+
+        const index = Math.floor(Math.random() * responses.length);
+
+        console.log(responses[index]);
     }
 
     //--update
@@ -581,8 +638,7 @@ try {
     isContinuous = values.continuous;
     isVerbose = values.verbose;
     isFormat = values.format;
-    isScroll = values.scroll;
-    recursionLevel = parseInt(values.recursion);
+    isSorted = values.sort;
 
     //--pretty only applies if both
     //stdout and stderr support colors
@@ -594,9 +650,15 @@ try {
         baseline = parseInt(values.baseline);
         isBaselineSpecified = true;
     }
+
     if(values.wait) {
         waitMS = parseInt(values.wait);
     }
+
+    if(values.recursion) {
+        recursionLevel = parseInt(values.recursion);
+    }
+
     if(values.decimal) {
         decPlaces = parseInt(values.decimal);
         isDecPlaceSpecified = true;
