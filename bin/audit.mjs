@@ -7,9 +7,15 @@
  * @version 1.0.0
  */
 
+//Update this with every release
+const version = "1.0.0";
+
 import {chromium} from "playwright";
 import {parseArgs, styleText} from "node:util";
-import { createInterface } from 'node:readline/promises';
+import {createInterface} from 'node:readline/promises';
+import {openSync, createWriteStream} from "node:fs";
+import {Console} from "node:console";
+import {finished} from "stream/promises";
 
 //Return value of Audit
 //0 = No error
@@ -25,13 +31,15 @@ let isContinuous = false;
 let isVerbose = false;
 let isFormat = false;
 let isPretty = false;
-let isSorted = true;
-let recursionLevel = 0; //--recursive
+let isSorted = false;
 let baseline = 0; //--baseline
 let isBaselineSpecified = false;
 let waitMS = 30000; //--wait
 let decPlaces = 3; //--decimal
 let isDecPlaceSpecified = false; //--decimal
+let batchSize = 5; //--batch
+let outputStream; //--output
+let isRedirected = false;
 
 //Object for list of results
 const results = {
@@ -44,10 +52,10 @@ const results = {
 //Reject Chalk, return to Node:Util
 function pretty(str, type) {
     const styles = {
-        success: "green",
+        success: ["green"],
         fail: ["red", "bold"], //DO NOT use this for stderr
-        err: "red",
-        info: "cyan",
+        err: ["red"],
+        info: ["cyan"],
         header: ["yellow", "bold"]
     };
     
@@ -59,7 +67,7 @@ function pretty(str, type) {
 function println(str, type) {
     //With --pretty
     let line;
-    if (isPretty) {
+    if (isPretty && !isRedirected) {
         line = pretty(str, type);
     } else {
         line = str;
@@ -72,14 +80,29 @@ function println(str, type) {
     }
 }
 
+//Helper for output() 
+//Replaces the global console to redirect things like
+//stdout and stderr
+//Does nothing if outputStream is undefined
+function replaceGlobalConsole() {
+    if (outputStream) {
+        isRedirected = true;
+        const fileConsole = new Console({
+            stdout: outputStream,
+            stderr: outputStream
+        });
+        global.console = fileConsole;
+    }
+}
 
-//TODO: Implement
-function output(filename) {
-
+//Helper for flushing a stream
+async function finishStream(stream) {
+    stream.end();
+    await finished(stream);
 }
 
 //Helper to determine unit
-function formatUnit(mem, isFormat) {
+function formatUnit(mem) {
     const units = ["B", "KiB", "MiB", "GiB", "TiB"];
     const base = 1024; //Binary units constant
 
@@ -104,7 +127,7 @@ function formatUnit(mem, isFormat) {
 }
 
 //Log specifics in verbose mode
-function verboseLog(isVerbose, err, msg) {
+function verboseLog(err, msg) {
     if (isVerbose) {
         //Outputs err.message if msg is not provided
         const line = msg || err.message;
@@ -130,8 +153,9 @@ function format(res) {
     }
 
     //Sort list (ascending order)
+    let list;
     if (isSorted) {
-        results.list.sort(
+        list = results.list.toSorted(
             (pg1, pg2) => pg1.memSizePerWord - pg2.memSizePerWord
         );
     }
@@ -171,7 +195,7 @@ function format(res) {
             baseline = res.avgMem / res.list.length;
         }
 
-        const formattedNum = formatUnit(baseline, isFormat);
+        const formattedNum = formatUnit(baseline);
 
         println(`Avg Mem/Word: ${formattedNum}`, "header");
 
@@ -180,20 +204,25 @@ function format(res) {
         let bloatCol = "Bloated?";
         let numBloated = 0;
 
-        //TODO: Add options to change col width settings
         //Headers
         println(`${urlCol.padEnd(32)}${memCol.padEnd(16)}${bloatCol.padEnd(8)}`, "header");
 
         //Results
         //Style: Success (Green)
-        for (const r of res.list) {
+        for (const r of list) {
+
+            //Sanity check
+            if (r.memSize < 0) {
+                continue;
+            }
 
             let style = "success";
 
             //Displays host only
             urlCol = r.userURL.host;
-            memCol = formatUnit(r.memSize / r.totalWC, isFormat);
+            memCol = formatUnit(r.memSize / r.totalWC);
             bloatCol = "No";
+
             if (r.memSizePerWord > baseline) {
                 bloatCol = "Yes";
                 numBloated++;
@@ -209,7 +238,7 @@ function format(res) {
 
     } else {
         //Non human mode simply prints URL + formatted Mem/Word
-        for (const r of res.list) {
+        for (const r of list) {
             println(`${r.userURL.toString()} ${formatUnit(r.memSize / r.totalWC)}`, "success");
         }
     }
@@ -339,7 +368,7 @@ async function browsePage(browser, userURL) {
             return;
         }
 
-        verboseLog(isVerbose, null, `${userURL} audited.`);
+        verboseLog(null, `${userURL} audited.`);
 
         //userURL is an URL object
         res = {...res, memSize, userURL};
@@ -362,41 +391,60 @@ async function browsePage(browser, userURL) {
 
 //Spawns the browser instance and shared context
 //Closes browser after all pages are done
-async function browse(userURL, recursionLevel) {
+async function browse(userURL) {
     //Launch browser
     const browser = await chromium.launch({
         headless: isHeadless,
     });
 
-    //Promise.all() takes in array of promises
-    //Which means map() that returns array of promises is preferred
-    //HOWEVER, since Audit skips URLs, for loop is still used
+    //Batch URLs for concurrency
+    //Default batch is 5 URLS at a time
+    //If you set the batchSize too high
+    //YOU WILL FORK BOMB YOURSELF
+    let lastIndex = 0;
 
-    const promises = [];
-    //userURL is an array of potential URLs
-    for (let url of userURL) {
-        //Check URL is valid
-        if ((url = isValidURL(url))) {
-            verboseLog(isVerbose, null, `Launching ${url.toString()}`);
-        } else {
-            println("Error: Invalid URL", "err");
-            continue;
+    while (lastIndex < userURL.length) {
+        //Promise.all() takes in array of promises
+        //Which means map() that returns array of promises is preferred
+        //HOWEVER, since Audit skips URLs, for loop is still used
+        const promises = [];
+        //userURL is an array of potential URLs
+        for (let i = 0; i < batchSize; ++i) {
+            
+            //Out of bounds, break
+            if (lastIndex + i >= userURL.length) {
+                break;
+            }
+
+            let url = userURL[lastIndex + i];
+
+            //Check URL is valid
+            if ((url = isValidURL(url))) {
+                verboseLog(null, `Launching ${url.toString()}`);
+            } else {
+                println("Error: Invalid URL", "err");
+                continue;
+            }
+
+            //Note the lack of await here for concurrency
+            //Quick explainer for async in JS...
+            //It's syntax sugar for
+            //return new Promise(...);
+            //So no race condition here
+            //pg would immediately hold a Promise object
+            //which is then pushed
+            const pg = browsePage(browser, url);
+            promises.push(pg);
         }
 
-        //Note the lack of await here for concurrency
-        //Quick explainer for async in JS...
-        //It's syntax sugar for
-        //return new Promise(...);
-        //So no race condition here
-        //pg would immediately hold a Promise object
-        //which is then pushed
-        const pg = browsePage(browser, url);
-        promises.push(pg);
+        await Promise.all(promises);
+
+        lastIndex += batchSize;
+        
+        verboseLog(null, "-----Batch processed-----");
     }
 
-    await Promise.all(promises);
-
-    await browser.close();
+    await browser.close().catch(() => {});
 }
 
 //Continuous Mode
@@ -409,7 +457,7 @@ async function input() {
     const stopWords = ["q", "stop", "exit", "quit", "end"];
 
     println("Type RESET in all caps to reset the current list!", "info");
-    println("Type OUTPUT in all caps to ouput the current list!", "info");
+    println("Type OUTPUT in all caps to output the current list!", "info");
 
     while (true) {
         const userURL = await rl.question("Enter URL (https://example.com)\n");
@@ -436,15 +484,15 @@ async function input() {
         }
 
         //Encapsulate userURL in an array for browse()
-        await browse([userURL], recursionLevel);
+        await browse([userURL]);
 
         println(`${userURL} audited!`, "info");
     }
 
     rl.close();
 
-    //TODO: Pipe to file for --output
-    //Call format after switching pipe
+    //Pipe to output file
+    replaceGlobalConsole();
 
     //Format output
     format(results);
@@ -471,6 +519,9 @@ const config = {
             type: "boolean",
             default: false,
         },
+        batch: {
+            type: "string",
+        },
         headless: {
             type: "boolean",
             short: "h",
@@ -489,7 +540,6 @@ const config = {
         output: {
             type: "string",
             short: "o",
-            default: "log.txt",
         },
         format: {
             type: "boolean",
@@ -500,10 +550,6 @@ const config = {
             type: "boolean",
             short: "p",
             default: false,
-        },
-        recursive: {
-            type: "string",
-            short: "r",
         },
         baseline: {
             type: "string",
@@ -533,10 +579,10 @@ async function processURLs(urls) {
         throw new Error("No urls provided!");
     }
 
-    //Loop
-    await browse(urls, recursionLevel);
+    await browse(urls);
 
-    //TODO: Pipe to file for --output
+    //Pipe to output file
+    replaceGlobalConsole();
 
     //Format output
     format(results);
@@ -547,59 +593,66 @@ try {
     const {values, positionals} = parseArgs(config);
 
     //--help
-    //TODO: add text
     if (values.help) {
         //Ignore the weird format, JS template literals
         const helpMsg = 
-        `Audit: Test RAM usage of websites!
-    Flags
+        `
+Audit: Test RAM usage of websites!
+    Flags:
     --help
-    Show instructions and flags for Audit
+        Show instructions and flags for Audit
     --version
-    Show Audit version
+        Show Audit version
     --blame
-    Spiritually blames the guy that wrote this
-    In other words, only useful for venting and hurting my feelings :(
-    --update
-    Check for updates and update Audit if needed
+        Spiritually blames the guy that wrote this
+        Only useful for venting and hurting my feelings :(
     -h, --headless
-    Run Audit in headless mode (no browser window)
+        Run Audit in headless mode (no browser window)
     -c --continuous
-    Long running mode. Audit accepts URL input until terminated
+        Long running mode, Audit accepts URL input until terminated
+        With --output, only writes the FINAL URL list to the file
     -v --verbose
-    More detailed output
+        Logs more information and error messages
+        Useful for debugging how Audit is running
     -o --output
-    Logs output to a specified file
+        Logs output to a specified file
+    Ex. --output output.txt
+        Audit will write to output.txt, which includes
+        both the final result and error messages
     -f --format
-    Logs output in human readable format
+        Logs output in human readable format
+        Also sets default decimal place to 0
+        Use --decimal to set decimal place explicitly in this mode
     -p --pretty
-    Logs output with colored lines
-    Only works if stdout and stderr supports colors
-    Green: Non-bloated sites
-    Red: Bloated sites / Error
-    Cyan: Info
-    -r --recursive
-    Samples the site up to a specified number of times
-    Ex. audit -r 5 https://en.wikipedia.org 
-    will try to sample up to 5 pages from the URLs provided
-    and calculate by averaging the memory size/word
+        Logs output with colored lines
+        Only works if stdout and stderr supports colors
+        Green: Non-bloated sites
+        Red: Bloated sites / Error
+        Cyan: Info
+        DOES NOT corrupt file generated by --output with color codes
     -b --baseline
-    Manually set a baseline memory size/word for Audit to compare to
+        Manually set a baseline memory size/word for URLs to compare to
     -w --wait
-    Set the max amount of time in ms Audit should wait for a page to load
-    before measuring memory usage
+        Set the max amount of time in ms
+        Audit waits for a page to load before measuring memory usage
     -s --sort
-    Sorts the result in ascending order of RAM usage
+        Sorts the result in ascending order of RAM usage
     -d --decimal
-    Change number of decimal places for output
-    Default is 3`;
+        Change number of decimal places for output
+        Default is 3
+    --batch
+        Sets the max number of tabs that can be concurrently opened
+        Default is 5
+        WARNING: Setting this too high will fork bomb yourself
+        If the last line is confusing, it's a good sign that you
+        shouldn't change this.
+`;
         console.log(helpMsg);
     }
 
     //--version
-    //TODO: Implement
     if (values.version) {
-        console.log("Audit version");
+        console.log(`Audit version ${version}`);
     }
 
     //--blame
@@ -619,12 +672,6 @@ try {
         console.log(responses[index]);
     }
 
-    //--update
-    //TODO: Implement
-    if (values.update) {
-        console.log("Audit update");
-    }
-
     //Terminate on long flags
     if (values.help || values.version || values.blame || values.update) {
         process.exit(errno);
@@ -633,7 +680,7 @@ try {
     //Setting values for flags
     //Setting them explicitly instead of dereferencing
     //Because I think it's better semantics
-    //Also because recursionLevel and others require parseInt
+    //Also because some require parseInt
     isHeadless = values.headless;
     isContinuous = values.continuous;
     isVerbose = values.verbose;
@@ -646,22 +693,58 @@ try {
         isPretty = values.pretty;
     }
 
-    if(values.baseline) {
-        baseline = parseInt(values.baseline);
+    //Helper to check numbers
+    function validNum(num) {
+        //All settings should be
+        //>=0
+        //not NaN
+        //throw error and exit if assertion fails
+        if (Number.isNaN(num) || num < 0) {
+            throw new Error("Invalid settings!");
+        }
+
+        return num;
+    }
+
+    //--baseline
+    if (values.baseline) {
+        baseline = validNum(parseInt(values.baseline));
         isBaselineSpecified = true;
     }
 
-    if(values.wait) {
-        waitMS = parseInt(values.wait);
+    //--wait
+    if (values.wait) {
+        waitMS = validNum(parseInt(values.wait));
     }
 
-    if(values.recursion) {
-        recursionLevel = parseInt(values.recursion);
-    }
-
-    if(values.decimal) {
-        decPlaces = parseInt(values.decimal);
+    //--decimal
+    if (values.decimal) {
+        decPlaces = validNum(parseInt(values.decimal));
         isDecPlaceSpecified = true;
+    }
+
+    //--batch
+    //If set to 0, default to 1
+    if (values.batch) {
+        batchSize = validNum(parseInt(values.batch)) || 1;
+    }
+
+    //--output
+    if (values.output) {
+        const fname = values.output;
+
+        //Sanity check for fname
+        //Throws on names the OS does not allow
+        //w = O_CREAT|O_WRONLY|O_TRUNC
+        const fd = openSync(fname, "w");
+
+        //Wrap fd up in a stream for piping
+        //Because Node doesn't have dup2()
+        outputStream = createWriteStream(null, {fd});
+
+        outputStream.on("error", (err) => {
+            verboseLog(err);
+        });
     }
 
     if (isContinuous) {
@@ -676,7 +759,7 @@ try {
     println(`Error: ${err.message}`, "err");
 }
 
-//TODO: Delete
-console.log("Errno:", errno);
+//Flush the output
+await finishStream(outputStream);
 
 process.exit(errno);
