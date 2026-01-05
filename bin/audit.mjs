@@ -7,15 +7,15 @@
  * @version 1.0.0
  */
 
-//Update this with every release
-const version = "1.0.0";
-
 import {chromium} from "playwright";
 import {parseArgs, styleText} from "node:util";
 import {createInterface} from 'node:readline/promises';
 import {openSync, createWriteStream} from "node:fs";
 import {Console} from "node:console";
 import {finished} from "stream/promises";
+
+//Update this with every release
+const version = "1.0.0";
 
 //Return value of Audit
 //0 = No error
@@ -39,7 +39,7 @@ let decPlaces = 3; //--decimal
 let isDecPlaceSpecified = false; //--decimal
 let batchSize = 5; //--batch
 let outputStream; //--output
-let isRedirected = false;
+let isRedirected = false; //--output
 
 //Object for list of results
 const results = {
@@ -64,6 +64,7 @@ function pretty(str, type) {
 
 //Wrapper for console.log and console.error
 //Checks for --pretty and applies colors automatically
+//Skips pretty formatting if output redirected
 function println(str, type) {
     //With --pretty
     let line;
@@ -95,10 +96,13 @@ function replaceGlobalConsole() {
     }
 }
 
-//Helper for flushing a stream
-async function finishStream(stream) {
-    stream.end();
-    await finished(stream);
+//Helper for flushing outputStream
+//Does nothing if outputStream is undefined 
+async function finishStream() {
+    if (outputStream) {
+        outputStream.end();
+        await finished(outputStream);
+    }
 }
 
 //Helper to determine unit
@@ -108,6 +112,12 @@ function formatUnit(mem) {
 
     //Log base change to get appropriate unit
     let index = Math.floor(Math.log(mem) / Math.log(base)); 
+
+    //If somehow index < 0 (log(mem) is negative)
+    //set index to 0
+    if (index < 0) {
+        index = 0;
+    }
 
     //If index > units.length, use the largest unit
     if (index > units.length) {
@@ -153,7 +163,7 @@ function format(res) {
     }
 
     //Sort list (ascending order)
-    let list;
+    let list = results.list;
     if (isSorted) {
         list = results.list.toSorted(
             (pg1, pg2) => pg1.memSizePerWord - pg2.memSizePerWord
@@ -171,12 +181,10 @@ function format(res) {
         //...
         //# of bloated sites = A
         //# of good sites = B
-        //Length of URL column is max(AUDIT_URL_LEN, urlLen)
-        //Default is 32 chars
-        //Similar logic applies for mem/word
+        //Default URL column is 32 chars
         //Default for mem/word is 16 chars
         //Bloated is 8 chars
-        //Ignores slugs and only displays the subdomain
+        //Only displays the host name
         //UNIT is automatically converted to the neatest unit
         //Always in binary units (KiB, MiB, GiB, etc.)
 
@@ -191,6 +199,12 @@ function format(res) {
         }
         res.oldLen = res.list.length;
 
+        //If no baseline is specified
+        //Dynamically adjust the average based on the sites
+        //audited so far
+        //"Bloat" is only meaningful with comparison anyways
+        //google.com is bloated compared to enwp.org but not to youtube.com
+        //So the rolling average is used
         if(!isBaselineSpecified) {
             baseline = res.avgMem / res.list.length;
         }
@@ -212,7 +226,7 @@ function format(res) {
         for (const r of list) {
 
             //Sanity check
-            if (r.memSize < 0) {
+            if (r.memSize < 0 || r.totalWC <= 0) {
                 continue;
             }
 
@@ -235,10 +249,15 @@ function format(res) {
         //Num of bloated sites
         println(`# of bloated sites: ${numBloated}`, "header");
         println(`# of good sites: ${res.list.length - numBloated}`, "header");
-
     } else {
         //Non human mode simply prints URL + formatted Mem/Word
         for (const r of list) {
+
+            //Sanity check
+            if (r.memSize < 0 || r.totalWC <= 0) {
+                continue;
+            }
+
             println(`${r.userURL.toString()} ${formatUnit(r.memSize / r.totalWC)}`, "success");
         }
     }
@@ -318,7 +337,7 @@ async function browsePage(browser, userURL) {
             }
 
             //Helper for walking DOM tree
-            async function walk() {
+            function walk() {
                 const walker = document.createTreeWalker(
                     document.body, // Root node to start traversal
                     NodeFilter.SHOW_TEXT, // Only show text nodes
@@ -348,13 +367,14 @@ async function browsePage(browser, userURL) {
                     }
                 );
 
+                //Basically a traversal of a linked list
                 let node;
                 while ((node = walker.nextNode()) !== null) {
                     result.totalWC += wc(node.textContent);
                 }
             }
 
-            await walk();
+            walk();
 
             return result;
         });
@@ -380,8 +400,8 @@ async function browsePage(browser, userURL) {
     } catch(err) {
         errno = 1;
         println(`Error: Page evaluation of ${userURL} failed.`, "err");
-        return;
     } finally {
+        //CLOSE the page no matter what
         //The ugliest line in existence
         if (page) {
             await page.close().catch(() => {});
@@ -392,59 +412,70 @@ async function browsePage(browser, userURL) {
 //Spawns the browser instance and shared context
 //Closes browser after all pages are done
 async function browse(userURL) {
-    //Launch browser
-    const browser = await chromium.launch({
-        headless: isHeadless,
-    });
 
-    //Batch URLs for concurrency
-    //Default batch is 5 URLS at a time
-    //If you set the batchSize too high
-    //YOU WILL FORK BOMB YOURSELF
-    let lastIndex = 0;
+    //Giant try catch
+    let browser;
+    try {
+        //Launch browser
+        //If this fails, there're bigger problems
+        browser = await chromium.launch({
+            headless: isHeadless,
+        });
 
-    while (lastIndex < userURL.length) {
-        //Promise.all() takes in array of promises
-        //Which means map() that returns array of promises is preferred
-        //HOWEVER, since Audit skips URLs, for loop is still used
-        const promises = [];
-        //userURL is an array of potential URLs
-        for (let i = 0; i < batchSize; ++i) {
+        //Batch URLs for concurrency
+        //Default batch is 5 URLS at a time
+        //If you set the batchSize too high
+        //YOU WILL FORK BOMB YOURSELF
+        let lastIndex = 0;
+
+        while (lastIndex < userURL.length) {
+            //Promise.all() takes in array of promises
+            //Which means map() is preferred
+            //HOWEVER, since Audit skips URLs, for loop is still used
+            const promises = [];
+            //userURL is an array of potential URLs
+            for (let i = 0; i < batchSize; ++i) {
+                
+                //Out of bounds, break
+                if (lastIndex + i >= userURL.length) {
+                    break;
+                }
+
+                let url = userURL[lastIndex + i];
+
+                //Check URL is valid
+                if ((url = isValidURL(url))) {
+                    verboseLog(null, `Launching ${url.toString()}`);
+                } else {
+                    println("Error: Invalid URL", "err");
+                    continue;
+                }
+
+                //Note the lack of await here for concurrency
+                //Quick explainer for async in JS...
+                //It's syntax sugar for
+                //return new Promise(...);
+                //So no race condition here
+                //pg would immediately hold a Promise object
+                //which is then pushed
+                const pg = browsePage(browser, url);
+                promises.push(pg);
+            }
+
+            await Promise.all(promises);
+
+            lastIndex += batchSize;
             
-            //Out of bounds, break
-            if (lastIndex + i >= userURL.length) {
-                break;
-            }
-
-            let url = userURL[lastIndex + i];
-
-            //Check URL is valid
-            if ((url = isValidURL(url))) {
-                verboseLog(null, `Launching ${url.toString()}`);
-            } else {
-                println("Error: Invalid URL", "err");
-                continue;
-            }
-
-            //Note the lack of await here for concurrency
-            //Quick explainer for async in JS...
-            //It's syntax sugar for
-            //return new Promise(...);
-            //So no race condition here
-            //pg would immediately hold a Promise object
-            //which is then pushed
-            const pg = browsePage(browser, url);
-            promises.push(pg);
+            verboseLog(null, "-----Batch processed-----");
         }
-
-        await Promise.all(promises);
-
-        lastIndex += batchSize;
-        
-        verboseLog(null, "-----Batch processed-----");
+    } catch(err) {
+        throw new Error("Browser instance failed!");
+    } finally {
+        //CLOSE THE BROWSER NO MATTER WHAT
+        if (browser) {
+            await browser.close().catch(() => {});
+        }
     }
-
-    await browser.close().catch(() => {});
 }
 
 //Continuous Mode
@@ -489,6 +520,7 @@ async function input() {
         println(`${userURL} audited!`, "info");
     }
 
+    //Close interface
     rl.close();
 
     //Pipe to output file
@@ -512,10 +544,6 @@ const config = {
             default: false,
         },
         blame: {
-            type: "boolean",
-            default: false,
-        },
-        update: {
             type: "boolean",
             default: false,
         },
@@ -569,6 +597,7 @@ const config = {
             short: "d",
         },
     },
+    //Positionals are treated as list of URLs
     allowPositionals: true
 };
 
@@ -579,10 +608,10 @@ async function processURLs(urls) {
         throw new Error("No urls provided!");
     }
 
-    await browse(urls);
-
     //Pipe to output file
     replaceGlobalConsole();
+
+    await browse(urls);
 
     //Format output
     format(results);
@@ -632,6 +661,7 @@ Audit: Test RAM usage of websites!
         DOES NOT corrupt file generated by --output with color codes
     -b --baseline
         Manually set a baseline memory size/word for URLs to compare to
+        CANNOT be 0
     -w --wait
         Set the max amount of time in ms
         Audit waits for a page to load before measuring memory usage
@@ -673,7 +703,7 @@ Audit: Test RAM usage of websites!
     }
 
     //Terminate on long flags
-    if (values.help || values.version || values.blame || values.update) {
+    if (values.help || values.version || values.blame) {
         process.exit(errno);
     }
 
@@ -708,7 +738,14 @@ Audit: Test RAM usage of websites!
 
     //--baseline
     if (values.baseline) {
+        //Baseline of 0 is not allowed since it's not meaningful
+        //Also because it would break formatUnit()
         baseline = validNum(parseInt(values.baseline));
+
+        if (baseline === 0) {
+            throw new Error("Invalid baseline! Cannot be 0.");
+        }
+
         isBaselineSpecified = true;
     }
 
@@ -755,11 +792,13 @@ Audit: Test RAM usage of websites!
     }
 
 } catch (err) {
+    //Unaccounted errors end up here
     errno = 2;
     println(`Error: ${err.message}`, "err");
+} finally {
+    //Flush the output
+    await finishStream().catch(() => {});
+
+    //Exit and return error code
+    process.exit(errno);
 }
-
-//Flush the output
-await finishStream(outputStream);
-
-process.exit(errno);
