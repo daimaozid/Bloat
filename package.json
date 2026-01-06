@@ -1,21 +1,31 @@
 {
-  "name": "audit",
+  "name": "bloat",
   "version": "1.0.0",
-  "description": "Check bloat for websites",
-  "license": "ISC",
+  "description": "A CLI tool for checking bloat for websites",
+  "main": "bloat.mjs",
+  "bin": {
+    "bloat": "./bin/bloat.mjs",
+    "blt": "./bin/bloat.mjs"
+  },
   "author": "Hongji Dai",
-  "type": "commonjs",
-  "main": "index.js",
-  "scripts": {},
+  "email": "daimaozid@gmail.com",
+  "url": "https://github.com/daimaozid",
+  "license": "GPL-2.0-or-later",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/daimaozid/Bloat"
+  },
+  "engines": {
+      "node": ">=20.0.0"
+  },
+  "dependencies" : {
+    "@palywright/test": "^1.57.0"
+  },
   "devDependencies": {
     "@eslint/js": "^9.39.2",
-    "@playwright/test": "^1.57.0",
     "@types/node": "^25.0.3",
     "eslint": "^9.39.2",
     "globals": "^16.5.0"
-  },
-  "type": "module",
-  "bin": {
-      "audit": "./audit.mjs"
   }
 }

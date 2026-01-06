@@ -1,10 +1,15 @@
 #!/usr/bin/env node
 
 /**
- * @fileoverview Main code for Audit
+ * @fileoverview A simple CLI tool to check bloat (RAM usage) of URLs
  * @author Hongji Dai
  * @date 2025/12/27
  * @version 1.0.0
+ * @license GPL-2.0-or-later
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  */
 
 import {chromium} from "playwright";
@@ -14,10 +19,12 @@ import {openSync, createWriteStream} from "node:fs";
 import {Console} from "node:console";
 import {finished} from "stream/promises";
 
+const author = "Hongji Dai";
+
 //Update this with every release
 const version = "1.0.0";
 
-//Return value of Audit
+//Return value of Bloat
 //0 = No error
 //1 = Minor error (program can still run)
 // Ex. 1 broken url found
@@ -431,7 +438,7 @@ async function browse(userURL) {
         while (lastIndex < userURL.length) {
             //Promise.all() takes in array of promises
             //Which means map() is preferred
-            //HOWEVER, since Audit skips URLs, for loop is still used
+            //HOWEVER, since Bloat skips URLs, for loop is still used
             const promises = [];
             //userURL is an array of potential URLs
             for (let i = 0; i < batchSize; ++i) {
@@ -529,7 +536,7 @@ async function input() {
     //Format output
     format(results);
 
-    println("Exiting Audit.", "info");
+    println("Exiting Bloat.", "info");
 }
 
 //Flags
@@ -544,6 +551,10 @@ const config = {
             default: false,
         },
         blame: {
+            type: "boolean",
+            default: false,
+        },
+        license: {
             type: "boolean",
             default: false,
         },
@@ -626,27 +637,29 @@ try {
         //Ignore the weird format, JS template literals
         const helpMsg = 
         `
-Audit: Test RAM usage of websites!
+Bloat: Test RAM usage of websites!
     Flags:
     --help
-        Show instructions and flags for Audit
+        Show instructions and flags for Bloat
     --version
-        Show Audit version
+        Show Bloat version
     --blame
         Spiritually blames the guy that wrote this
         Only useful for venting and hurting my feelings :(
-    -h, --headless
-        Run Audit in headless mode (no browser window)
+    --license
+        Displays the license for Bloat
+    -h --headless
+        Run Bloat in headless mode (no browser window)
     -c --continuous
-        Long running mode, Audit accepts URL input until terminated
+        Long running mode, Bloat accepts URL input until terminated
         With --output, only writes the FINAL URL list to the file
     -v --verbose
         Logs more information and error messages
-        Useful for debugging how Audit is running
+        Useful for debugging how Bloat is running
     -o --output
         Logs output to a specified file
-    Ex. --output output.txt
-        Audit will write to output.txt, which includes
+    Ex. bloat --output output.txt
+        Bloat will write to output.txt, which includes
         both the final result and error messages
     -f --format
         Logs output in human readable format
@@ -664,7 +677,7 @@ Audit: Test RAM usage of websites!
         CANNOT be 0
     -w --wait
         Set the max amount of time in ms
-        Audit waits for a page to load before measuring memory usage
+        Bloat waits for a page to load before measuring memory usage
     -s --sort
         Sorts the result in ascending order of RAM usage
     -d --decimal
@@ -682,7 +695,7 @@ Audit: Test RAM usage of websites!
 
     //--version
     if (values.version) {
-        console.log(`Audit version ${version}`);
+        console.log(`Bloat version ${version}`);
     }
 
     //--blame
@@ -694,7 +707,7 @@ Audit: Test RAM usage of websites!
             "Sticks and stones may break my bones, but names will never hurt me... *sniffle*",
             "Check out git blame. You can actually blame people with that.",
             "You discovered a secret response! Oh wait, you didn't.",
-            "I guess this flag is minorly useful for checking if Audit is installed properly?",
+            "I guess this flag is minorly useful for checking if Bloat is installed properly?",
         ];
 
         const index = Math.floor(Math.random() * responses.length);
@@ -702,8 +715,20 @@ Audit: Test RAM usage of websites!
         console.log(responses[index]);
     }
 
+    //--license
+    if (values.license) {
+        //Ignore weird formatting
+        console.log(`
+    Copyright (C) 2026 ${author}
+    This program comes with ABSOLUTELY NO WARRANTY.
+    This is free software, and you are welcome to redistribute it
+    under the terms of the GNU General Public License version 2
+    (or, at your option, any later version).
+        `);
+    }
+
     //Terminate on long flags
-    if (values.help || values.version || values.blame) {
+    if (values.help || values.version || values.blame || values.license) {
         process.exit(errno);
     }
 
@@ -785,7 +810,7 @@ Audit: Test RAM usage of websites!
     }
 
     if (isContinuous) {
-        println("Audit is running in continuous mode!", "info");
+        println("Bloat is running in continuous mode!", "info");
         await input();
     } else {
         await processURLs(positionals);
