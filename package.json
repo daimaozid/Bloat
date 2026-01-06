@@ -27,5 +27,17 @@
     "@types/node": "^25.0.3",
     "eslint": "^9.39.2",
     "globals": "^16.5.0"
-  }
+  },
+  "keywords": [
+    "bloat",
+    "bloat-detector",
+    "size-analyzer",
+    "dependency-cleaner",
+    "bundle-size",
+    "node-modules",
+    "cli",
+    "optimization",
+    "lightweight",
+    "performance"
+  ]
 }

@@ -22,7 +22,7 @@ import {finished} from "stream/promises";
 const author = "Hongji Dai";
 
 //Update this with every release
-const version = "1.0.0";
+const version = "1.0.1";
 
 //Return value of Bloat
 //0 = No error

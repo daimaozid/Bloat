@@ -18,12 +18,15 @@ Simple Node.js CLI tool to test and display ram usage of websites.
 
 Install the tool globally via **npm**:
 ```bash
-npm install -g bloat
+npm install -g @daimaozid/bloat
 ```
 Then install the Playwright browser using:
 ```bash
-npx playwright install chromium --with-deps
+npx playwright install chromium
 ```
+
+>Note: If it fails to launch, you may need to install system dependencies with:  
+>```npx playwright install-deps chromium```
 
 #### 2. Direct installation via git
 
@@ -39,16 +42,13 @@ npx playwright install chromium --with-deps
 ### Usage
 
 You can run the tool with:
-```bash
-bloat
-# or
-blt
-```
+```bloat``` or ```blt```
 
 The structure is as follows:
 ```
 bloat [options] [URLs (https://example.com)]
 ```
+>Note: You must include the protocol for it to work.
 
 #### Example Usage
 
@@ -115,6 +115,76 @@ bloat --help
 -s --sort
     Sorts the result in ascending order of RAM usage
 ```
+
+## Uninstallation
+
+To remove the tool and the browser binary it installed:
+
+1. Remove the browser binary:
+    ```bash
+    npx playwright uninstall chromium
+    ```
+
+#### If installed with npm:
+2. Uninstall the tool globally:
+    ```bash
+    npm uninstall -g @daimaozid/bloat
+    ```
+
+#### If installed manually with git:
+2. Unlink Bloat
+    ```bash
+    npm unlink
+    ```
+3. Delete Bloat folder
+    ```bash
+    cd .. && rm -rf Bloat/
+    ```
+
+## FAQ
+
+#### Q: Your code *SUCKS!!!*
+A: Not a question. But you have hurt my feelings \*sniffle\*
+
+#### Q: Why did you make this?
+A: The funny answer is because blt is a funny acronym. The serious answer is that I just find it interesting to see RAM usage of websites and figure out which ones run best on my potato.
+
+#### Q: It's not accurate for [insert site with foreign language]!
+A: It's likely because the word counter regex used only considers characters seperated by space as "words." Which unfortunately means it will not parse languages like Chinese or Japanese with no spaces between characters correctly. I may or may not fix this in the future and add an option to address this.
+
+#### Q: Why a metric like memory usage / word?
+A: A few reasons why I picked such a metric:
+1. It's stupid simple to implement the logic.
+2. I think it's an intuitive metric. If you page uses 10GiB / word, it's probably not that efficient with memory usage.
+3. It requires the least amount of "opinion" from the tool. Most people can agree on what a "word" is in English instinctively. It's a lot harder to design a *consistent* tool that needs to decide if it should include \<img\> or \<iframe\> as something it should consider depending on the site.
+
+#### Q: What is a KiB, MiB, GiB, etc?
+A: It's the units for memory that is actually based in binary. 1 KiB = 1024 bytes. Units like KB and MB and GB technically only refer to base 10. 1 KB = 1000 bytes exactly. Incredibly pedantic, I know.
+
+#### Q: Will this ever be updated?
+A: Probably not. If something breaks, you can
+1. Use ```bloat --blame``` to vent.
+2. Fork the repo and fix it yourself, but you have to share the src with me per GPLv2.
+3. Open an issue.
+4. Shoot me an angry email that I may or may not see.
+
+#### Q: Why do I have to install Chromium separately?
+A: Bloat does not come with browser to keep the package small (in other words, non-bloated).
+
+#### Q: Is my data safe?
+A: Yes. Everything runs locally on your machine in an isolated browser instance. And you don't have to trust my word. Read through the src.
+
+#### Q: OK, I read your code. Why is your code littered with global variables?
+A: It's makes coding easier and in a short script like this that will likely never be updated, it actually helps with readability. Writing everything with something like ```config.isVerbose``` would just boilerplate for my functions. IMHO.
+
+#### Q: It's running slow, what gives?
+A: Many confounding factors. Internet connection speed is the obvious culprit. But it could also be due to:
+1. Bad code from my part. Sorry.
+2. Your setting for --batch is too low. Try setting it higher if your machine can handle more tabs concurrently opening.
+3. The website is simply heavy and takes a long time to load. Try adjusting --wait to set a timeout that works for you. Use --verbose for extra logs in debugging.
+
+#### Q: Your grammar is bad.
+A: Yesn't.
 
 ## Contributors
 * **Hongji Dai** - *Author* - [GitHub](https://github.com/daimaozid) 
