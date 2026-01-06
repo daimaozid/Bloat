@@ -1,11 +1,11 @@
 {
-  "name": "bloat",
+  "name": "@daimaozid/bloat",
   "version": "1.0.0",
   "description": "A CLI tool for checking bloat for websites",
   "main": "bloat.mjs",
   "bin": {
-    "bloat": "./bin/bloat.mjs",
-    "blt": "./bin/bloat.mjs"
+    "bloat": "bin/bloat.mjs",
+    "blt": "bin/bloat.mjs"
   },
   "author": "Hongji Dai",
   "email": "daimaozid@gmail.com",
@@ -14,12 +14,12 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "https://github.com/daimaozid/Bloat"
+    "url": "git+https://github.com/daimaozid/Bloat.git"
   },
   "engines": {
-      "node": ">=20.0.0"
+    "node": ">=20.0.0"
   },
-  "dependencies" : {
+  "dependencies": {
     "@playwright/test": "^1.57.0"
   },
   "devDependencies": {
